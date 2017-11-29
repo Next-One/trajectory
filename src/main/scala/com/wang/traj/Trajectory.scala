@@ -185,7 +185,7 @@ object Trajectory {
 	}
 
 	/**
-	 * 目前使用经典DP算法对轨迹进行压缩
+	 * 目前使用滑动窗口算法对轨迹进行压缩
 	 * @param keyLine
 	 * @param threshold
 	 * @return
