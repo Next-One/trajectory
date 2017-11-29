@@ -1,21 +1,29 @@
 package com.wang.utils
 
-import com.wang.dp.Point
+import com.wang.slidewindow.Point
 
 object StringUtil {
-	def getLineString(line: java.util.List[Point]) = {
+	def getLineString(line: List[Point]) = {
 		val sb = new StringBuilder
 		sb.append("LINESTRING(")
 		var count = 0
 		val total = line.size
-		while (count < total) {
-			val p = line.get(count)
-			if (count != total - 1) {
-				sb.append(p.toString + ",")
-			} else {
-				sb.append(p.toString + ")")
+
+		if (total > 1) {
+			while (count < total) {
+				val p = line(count)
+				if (count != total - 1) {
+					sb.append(s"${p.getLon} ${p.getLat},")
+				} else {
+					sb.append(s"${p.getLon} ${p.getLat})")
+				}
+				count += 1
 			}
-			count += 1
+		}else if(total == 1){
+			val p = line.head
+			val ps = s"${p.getLon} ${p.getLat}"
+			sb.append(ps+",")
+			sb.append(ps+")")
 		}
 		sb.toString
 	}

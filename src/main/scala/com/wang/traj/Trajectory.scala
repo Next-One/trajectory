@@ -7,14 +7,15 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.wang.utils.SparkUtil
 import scala.collection.JavaConversions.seqAsJavaList
 import com.wang.utils.StringUtil
-import com.wang.dp.Point
-import com.wang.dp.DPClassic
+import com.wang.slidewindow.Point
+import com.wang.slidewindow.SlideWindow
 
 object Trajectory {
-
+	val LineSize = 10;
 	def start(threshold: String) = {
 		val ssc = SparkUtil.getSSC("sparkconf", "/spark/checkpoints", 5)
 		val kafkaStream = SparkUtil.getDStream("kafka", ssc)
+
 		//		将值提取出来在进行，序列化，设置检查点
 		val keyPoints = kafkaStream.map(keyPoint => (keyPoint.key, keyPoint.value))
 		keyPoints.checkpoint(Minutes(10))
@@ -34,17 +35,10 @@ object Trajectory {
 		val updateKeyPoints = (iterator: Iterator[(String, Seq[Point], Option[List[Point]])]) => {
 			iterator.flatMap(t => {
 				val newPoints = t._2.toList
-				var statePoints = t._3.getOrElse(Nil);
-				//				如果超过10个点就drop前10个,这里的10个点已经压缩储存过了，可以丢弃了
-				if (statePoints.length >= 10) {
-					statePoints = statePoints.drop(10)
-				} else {
-					if (!statePoints.isEmpty && isEnd(statePoints.last)) {
-						statePoints = Nil
-					}
-				}
+				var prevPoints = t._3.getOrElse(Nil);
+				prevPoints = drop(prevPoints)
 				//				也有可能和空值连接Nil
-				val currentPoints = statePoints ::: newPoints
+				val currentPoints = prevPoints ::: newPoints
 				Some(currentPoints)
 			}.filter(!_.isEmpty).map(line => (t._1, line)))
 		}
@@ -60,10 +54,71 @@ object Trajectory {
 		stateStream.foreachRDD { rdd =>
 			rdd.filter(keyLine => getHandleTraj(keyLine._2))
 				.map(trajCompress(_, threshold.toDouble))
-				.foreachPartition(trajToPostgis(_))
+				.foreachPartition(trajToPostgis)
 		}
 		ssc.start()
 		ssc.awaitTermination()
+	}
+
+	/**
+	 * 测试代码
+	 * @param keyLine
+	 * @return
+	 */
+	def showData(keyLine: (String, List[Point])) = {
+		val key = keyLine._1
+		val line = keyLine._2
+		val size = line.size
+		var sql = ""
+		if (size < LineSize && !line.isEmpty && isEnd(line.last)) {
+			val wkt = StringUtil.getLineString(keyLine._2)
+			val uid = parseTID(key)
+			sql = s"end($uid,$wkt)"
+		} else if (size >= LineSize && line.exists(isStart)) {
+			val starts = for (p <- line if isStart(p)) yield p
+			val wkt = StringUtil.getLineString(starts)
+			val uid = parseTID(key)
+			sql = s"start($uid,$wkt)"
+		}
+		s"${size} => ${sql}"
+	}
+
+	/**
+	 * 根据该丢弃规则，找出下一轮的应该保留的点
+	 * @param line
+	 */
+	def drop(line: List[Point]): List[Point] = {
+		var result = line
+		val len = line.length
+		if (len >= LineSize) {
+			result = line.find(isStart) match {
+				case Some(_) => line.dropWhile(isNull)
+				case None => line.drop(len - LineSize + 1)
+			}
+		} else if (!line.isEmpty && isEnd(line.last)) {
+			result = Nil
+		}
+		result
+	}
+
+	/**
+	 * 表示无状态的中间点
+	 * @param p
+	 * @return
+	 */
+	def isNull(p: Point): Boolean = {
+		val isStart = p.getIsStart
+		isStart == null
+	}
+
+	/**
+	 * 检查是不是开始点
+	 * @param p
+	 * @return
+	 */
+	def isStart(p: Point): Boolean = {
+		val isStart = p.getIsStart
+		isStart != null && isStart == true
 	}
 
 	/**
@@ -72,7 +127,7 @@ object Trajectory {
 	 * @return
 	 */
 	def getHandleTraj(line: List[Point]): Boolean = {
-		if (line.size >= 10)
+		if (line.size >= LineSize)
 			true
 		else
 			!line.isEmpty && isEnd(line.last)
@@ -84,10 +139,8 @@ object Trajectory {
 	 * @return
 	 */
 	def isEnd(p: Point): Boolean = {
-		val last = p.getIsEnd()
-		if (last != null && last == true)
-			return true
-		return false
+		val last = p.getIsEnd
+		last != null && last == true
 	}
 
 	/**
@@ -109,11 +162,22 @@ object Trajectory {
 		connect.setAutoCommit(false)
 		val stmt = connect.createStatement()
 		keyLines.foreach(keyLine => {
+			val line = keyLine._2
 			val tid = keyLine._1
-			val wkt = StringUtil.getLineString(keyLine._2)
-			val uid = parseTID(tid)
-			val sql = s"SELECT updateOrInsertLine('$tid',$uid,'$wkt')"
-			stmt.addBatch(sql)
+			val size = line.size
+			if (size < LineSize && !line.isEmpty && isEnd(line.last)) {
+				val wkt = StringUtil.getLineString(keyLine._2)
+				val uid = parseTID(tid)
+				val sql = s"SELECT updateOrInsertLine('$tid',$uid,'$wkt')"
+				stmt.addBatch(sql)
+			} else if (size >= LineSize && line.exists(isStart)) {
+				val starts = for (p <- line if isStart(p)) yield p
+				val wkt = StringUtil.getLineString(starts)
+				val uid = parseTID(tid)
+				val sql = s"SELECT updateOrInsertLine('$tid',$uid,'$wkt')"
+				stmt.addBatch(sql)
+			}
+
 		})
 		stmt.executeBatch()
 		connect.commit()
@@ -129,30 +193,13 @@ object Trajectory {
 	def trajCompress(keyLine: (String, List[Point]), threshold: Double): (String, List[Point]) = {
 		val key = keyLine._1
 		val line = keyLine._2
-		if (line.size >= 10) {
-			val ps = line.take(10)
-			val dp = new DPClassic(ps, threshold)
-			val result = dp.startCompress() //压缩完成后会用剩下的轨迹替换原始轨迹
-			return (key, javaListToScala(result))
+		if (line.size >= LineSize) {
+			val result = SlideWindow.slide(line, LineSize, threshold)
+			return (key, result)
 		}
 		return (key, line)
 	}
 
-	/**
-	 * 将java的list转化为scala
-	 * 的list
-	 * @param line
-	 * @return
-	 */
-	def javaListToScala(line: ju.List[Point]):List[Point] = {
-		var l = List[Point]()
-		val iter = line.iterator()
-		while (iter.hasNext()) {
-			val p = iter.next()
-			l = l :+ p
-		}
-		l
-	}
 }
 
 

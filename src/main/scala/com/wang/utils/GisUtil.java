@@ -4,12 +4,12 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 
-import com.wang.dp.Point;
+import com.wang.slidewindow.Point;
 
 /**
  * @author root
  */
-public class DPUtil {
+public class GisUtil {
 	public static final SimpleDateFormat TT_FORMAT = new SimpleDateFormat("ddHHmmss");
 	public static final SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 	private static final long EARTH_RADIUS = 6378137L;	//赤道半径(单位m) 这里必须用long类型
